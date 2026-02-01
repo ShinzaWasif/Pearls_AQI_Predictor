@@ -26,6 +26,9 @@ jobs:
           MONGO_URI: ${{ secrets.MONGO_URI }}
           MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
           MONGO_COLLECTION_NAME: ${{ secrets.MONGO_COLLECTION_NAME }}
+          DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+          DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+          DAGSHUB_REPO_NAME: ${{ secrets.DAGSHUB_REPO_NAME }}
         run: python pipelines/training_pipeline.py
 
       - name: Commit Updated Model
