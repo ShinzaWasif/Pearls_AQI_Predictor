@@ -1,0 +1,28 @@
+# --- Python Environments ---
+venv/
+.venv/
+env/
+
+# --- Secrets and Config ---
+.env
+*.json
+# If you want to be specific about the GCP key:
+gcp-service-account.json
+
+# --- User Requested Ignore ---
+tests/
+
+# --- Python Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+
+# --- Data and Logs ---
+data/
+*.log
+*.csv

@@ -1,0 +1,29 @@
+name: Hourly AQI Prediction
+
+on:
+  schedule:
+    - cron: "0 * * * *" # Runs at the start of every hour
+  workflow_dispatch: # Allows you to run it manually for testing
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Prediction
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+          MONGO_COLLECTION_NAME: ${{ secrets.MONGO_COLLECTION_NAME }}
+        run: python scripts/predict.py
