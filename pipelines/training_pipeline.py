@@ -246,10 +246,25 @@ def run_training():
 
     # --- 2. Identify Columns ---
     target_cols = [f'target_aqi_{i}h' for i in range(1, 73)]
-    feature_cols = [col for col in df.columns if col not in target_cols + ['timestamp', 'city', 'aqi']]
     
-    X = df[feature_cols]
+    # Filter for only numeric columns to avoid the Timestamp error
+    # This automatically ignores 'timestamp', 'city', and 'prediction_run_at'
+    X = df.drop(columns=target_cols, errors='ignore').select_dtypes(include=['number'])
     y = df[target_cols]
+    # --- New Cleaning Step ---
+    print("🧹 Cleaning missing values (NaNs)...")
+    
+    # Fill NaNs in features with the mean of each column
+    X = X.fillna(X.mean())
+    
+    # Fill NaNs in targets (y) as well, or drop those rows
+    y = y.fillna(y.mean())
+    
+    # Double check: if any NaNs remain (like in a column that was all NaNs)
+    X = X.fillna(0)
+    y = y.fillna(0)
+    print(f"📊 Training with {X.shape[1]} numeric features.")
+    print(f"📋 Columns used: {list(X.columns)}")
 
     # --- 3. Scale and Split ---
     scaler = StandardScaler()

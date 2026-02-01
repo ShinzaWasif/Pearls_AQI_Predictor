@@ -87,7 +87,6 @@
 # if __name__ == "__main__":
 #     run_inference()
 
-
 import os
 import sys
 import requests
@@ -97,6 +96,8 @@ import numpy as np
 import tensorflow as tf
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import mlflow
+import mlflow.keras
 
 # --- PATH FIX ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -111,18 +112,36 @@ def get_live_weather_forecast():
     return res['hourly']['temperature_2m'][:72], res['hourly']['wind_speed_10m'][:72]
 
 def run_inference():
-    # 1. Paths and Model Loading
-    model_path = os.path.join(project_root, "models", "best_72h_model_ann.keras")
-    scaler_path = os.path.join(project_root, "models", "scaler.joblib")
-
-    if not os.path.exists(model_path):
-        print(f"❌ ERROR: Model not found at {model_path}")
-        return
+    # 1. DagsHub / MLFLOW CONFIG
+    print("🚀 Connecting to DagsHub Model Registry...")
+    os.environ['MLFLOW_TRACKING_USERNAME'] = os.getenv("DAGSHUB_USERNAME")
+    os.environ['MLFLOW_TRACKING_PASSWORD'] = os.getenv("DAGSHUB_TOKEN")
     
-    model = tf.keras.models.load_model(model_path)
-    scaler = joblib.load(scaler_path)
+    dagshub_url = f"https://dagshub.com/{os.getenv('DAGSHUB_USERNAME')}/{os.getenv('DAGSHUB_REPO_NAME')}.mlflow"
+    mlflow.set_tracking_uri(dagshub_url)
 
-    # 2. Get Data from MongoDB
+    # 2. Load Model and Scaler
+    try:
+        # Load the model directly from DagsHub Registry
+        model_name = "AQI_ANN_72h"
+        model_version = "latest" 
+        model = mlflow.keras.load_model(model_uri=f"models:/{model_name}/{model_version}")
+        print("✅ Model loaded successfully from DagsHub!")
+        
+        # Scaler is usually kept locally or as an artifact
+        scaler_path = os.path.join(project_root, "models", "scaler.joblib")
+        if os.path.exists(scaler_path):
+            scaler = joblib.load(scaler_path)
+        else:
+            # Fallback: Try to download scaler from MLflow artifacts if you logged it there
+            print("⚠️ Local scaler not found, check your /models folder.")
+            return
+
+    except Exception as e:
+        print(f"❌ ERROR loading model/scaler: {e}")
+        return
+
+    # 3. Get Data from MongoDB
     client = MongoClient(os.getenv("MONGO_URI"))
     db = client[os.getenv("MONGO_DB_NAME")]
     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
@@ -130,45 +149,67 @@ def run_inference():
     cursor = collection.find({"city": "Karachi"}).sort("timestamp", -1).limit(2)
     latest_data_list = list(cursor)
     
+    if len(latest_data_list) < 2:
+        print("❌ Not enough data in MongoDB to calculate lag features.")
+        return
+
     latest_row = latest_data_list[0]
     prev_row = latest_data_list[1]
     
-    # 3. Get Weather Forecast
+    # 4. Get Weather Forecast
     f_temps, f_winds = get_live_weather_forecast()
 
-    # 4. Prepare Features
+    # 5. Prepare Features
+    # 5. Prepare Features (MATCHING TRAINING FEATURES)
+    now = pd.Timestamp.now()
+    
+    # Calculate some of the missing features
     input_data = {
         'temp': latest_row['temp'],
         'humidity': latest_row['humidity'],
         'wind_speed': latest_row['wind_speed'],
-        'hour': pd.Timestamp.now().hour,
-        'day_of_week': pd.Timestamp.now().dayofweek,
+        'hour': now.hour,
+        'day_of_week': now.dayofweek,
+        'month': now.month,                                  # Added 'month'
+        'is_winter': 1 if now.month in [11, 12, 1, 2] else 0, # Added 'is_winter'
+        'aqi': latest_row['aqi'],                            # Added 'aqi'
         'aqi_lag_1h': latest_row['aqi'],
-        'aqi_change_rate': (latest_row['aqi'] - prev_row['aqi']) / (prev_row['aqi'] + 1e-6)
+        'aqi_change_rate': (latest_row['aqi'] - prev_row['aqi']) / (prev_row['aqi'] + 1e-6),
+        
+        # For rolling/index columns that the scaler expects but aren't useful for current prediction:
+        'aqi_rolling_6h': latest_row['aqi'],                 # Fallback: use current aqi
+        'actual_aqi_index': 0,                               # Placeholders to satisfy the scaler
+        'target_day_1_aqi': 0,
+        'target_day_2_aqi': 0,
+        'target_day_3_aqi': 0
     }
 
+    # Add the 72h forecast temperatures and wind speeds
     for i in range(72):
         input_data[f'temp_f_{i+1}h'] = f_temps[i]
         input_data[f'wind_f_{i+1}h'] = f_winds[i]
 
     input_df = pd.DataFrame([input_data])
     
-    # Re-order features to match training
-    if hasattr(scaler, 'feature_names_in_'):
-        input_df = input_df[scaler.feature_names_in_]
+    # ⚠️ CRITICAL: Ensure all columns expected by the scaler exist
+    # Even if they are targets, the scaler was fitted on them, so they must be present
+    for col in scaler.feature_names_in_:
+        if col not in input_df.columns:
+            input_df[col] = 0  # Fill missing expected columns with 0
     
-    # 5. Predict Hourly
+    # Re-order features to match training expectations exactly
+    input_df = input_df[list(scaler.feature_names_in_)]
+    
+    # 6. Predict Hourly
     input_scaled = scaler.transform(input_df)
     hourly_preds = model.predict(input_scaled, verbose=0)[0]
 
-    # --- 6. NEW: GROUP BY DAY ---
+    # --- 7. GROUP BY DAY ---
     print("\n" + "="*45)
     print("🚀 KARACHI 3-DAY AQI FORECAST (Daily Average)")
     print("="*45)
     
     now = pd.Timestamp.now()
-    
-    # Split 72 hours into 3 chunks of 24 hours
     day_1 = hourly_preds[0:24]
     day_2 = hourly_preds[24:48]
     day_3 = hourly_preds[48:72]
@@ -184,23 +225,18 @@ def run_inference():
         date_str = date.strftime('%Y-%m-%d')
         print(f"{label:20} ({date_str}) | Avg AQI: {avg_aqi:6.2f} | {status}")
     
-    print("="*45)
-
-    # --- 7. SAVE TO MONGODB (Fixed for NumPy types) ---
+    # --- 8. SAVE TO MONGODB ---
     print("📡 Saving predictions to MongoDB...")
-
-    # Convert NumPy values to standard Python floats using .item()
     update_payload = {
         "timestamp": latest_row['timestamp'],  
-        "actual_aqi_index": float(latest_row['aqi']), # Ensure this is a float
-        "target_day_1_aqi": float(daily_summaries[0][1]), # .item() or float() works
+        "actual_aqi_index": float(latest_row['aqi']),
+        "target_day_1_aqi": float(daily_summaries[0][1]),
         "target_day_2_aqi": float(daily_summaries[1][1]),
         "target_day_3_aqi": float(daily_summaries[2][1]),
         "prediction_run_at": pd.Timestamp.now()
     }
 
     try:
-        # Update the record in MongoDB
         collection.update_one(
             {"_id": latest_row["_id"]}, 
             {"$set": update_payload},

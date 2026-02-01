@@ -44,7 +44,10 @@ def load_latest_data():
         collection = db[col_name]
         
         # Pull the absolute latest record from Karachi
-        latest = collection.find_one(sort=[("timestamp", -1)])
+        latest = collection.find_one(
+        {"target_day_1_aqi": {"$exists": True}}, 
+        sort=[("timestamp", -1)]
+    )
         return latest
     except Exception as e:
         st.error(f"❌ Connection Error: {e}")

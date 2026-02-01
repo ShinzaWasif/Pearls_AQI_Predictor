@@ -134,7 +134,9 @@ from dotenv import load_dotenv
 # --- PATH FIX ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
-load_dotenv(os.path.join(project_root, '.env'))
+# load_dotenv(os.path.join(project_root, '.env'))
+load_dotenv()
+
 
 from src.feature_engineering import compute_features
 

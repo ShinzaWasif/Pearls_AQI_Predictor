@@ -1,0 +1,8 @@
+pandas
+numpy
+pymongo
+python-dotenv
+requests
+joblib
+tensorflow
+streamlit
