@@ -1,13 +1,20 @@
+
 # import os
+# import sys
 # import requests
 # import pandas as pd
 # import joblib
 # import numpy as np
 # import tensorflow as tf
-# from google.cloud import bigquery
+# from pymongo import MongoClient
 # from dotenv import load_dotenv
+# import mlflow
+# import mlflow.keras
 
-# load_dotenv()
+# # --- PATH FIX ---
+# project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# sys.path.append(project_root)
+# load_dotenv(os.path.join(project_root, '.env'))
 
 # def get_live_weather_forecast():
 #     """Fetches real 72-hour forecast for Karachi from Open-Meteo"""
@@ -17,87 +24,152 @@
 #     return res['hourly']['temperature_2m'][:72], res['hourly']['wind_speed_10m'][:72]
 
 # def run_inference():
-#     # 1. Get the absolute path to the folder where THIS script lives (scripts/)
-#     script_dir = os.path.dirname(os.path.abspath(__file__))
+#     # 1. DagsHub / MLFLOW CONFIG
+#     print("🚀 Connecting to DagsHub Model Registry...")
+#     os.environ['MLFLOW_TRACKING_USERNAME'] = os.getenv("DAGSHUB_USERNAME")
+#     os.environ['MLFLOW_TRACKING_PASSWORD'] = os.getenv("DAGSHUB_TOKEN")
     
-#     # Go up one level to the project root (Pearls_AQI_Predictor/)
-#     project_root = os.path.dirname(script_dir)
-    
-#     # Create the perfect paths to your models
-#     model_path = os.path.join(project_root, "models", "best_72h_model_ann.keras")
-#     scaler_path = os.path.join(project_root, "models", "scaler.joblib")
+#     dagshub_url = f"https://dagshub.com/{os.getenv('DAGSHUB_USERNAME')}/{os.getenv('DAGSHUB_REPO_NAME')}.mlflow"
+#     mlflow.set_tracking_uri(dagshub_url)
 
-#     # Load them (with error handling to tell us exactly what's wrong)
-#     if not os.path.exists(model_path):
-#         print(f"❌ ERROR: Model not found at {model_path}")
+#     # 2. Load Model and Scaler
+#     try:
+#         # Load the model directly from DagsHub Registry
+#         model_name = "AQI_ANN_72h"
+#         model_version = "latest" 
+#         model = mlflow.keras.load_model(model_uri=f"models:/{model_name}/{model_version}")
+#         print("✅ Model loaded successfully from DagsHub!")
+        
+#         # Scaler is usually kept locally or as an artifact
+#         scaler_path = os.path.join(project_root, "models", "scaler.joblib")
+#         if os.path.exists(scaler_path):
+#             scaler = joblib.load(scaler_path)
+#         else:
+#             # Fallback: Try to download scaler from MLflow artifacts if you logged it there
+#             print("⚠️ Local scaler not found, check your /models folder.")
+#             return
+
+#     except Exception as e:
+#         print(f"❌ ERROR loading model/scaler: {e}")
 #         return
-    
-#     print(f"✅ Loading model from: {model_path}")
-#     model = tf.keras.models.load_model(model_path)
-#     scaler = joblib.load(scaler_path)
 
-#     # 2. Get Current Air Quality from BigQuery
-#     client = bigquery.Client.from_service_account_json(os.getenv("GCP_SERVICE_ACCOUNT_JSON"))
-#     query = f"""
-#         SELECT aqi, temp, humidity, wind_speed 
-#         FROM `{os.getenv('GCP_PROJECT_ID')}.{os.getenv('BQ_DATASET_ID')}.{os.getenv('BQ_TABLE_ID')}` 
-#         ORDER BY timestamp DESC LIMIT 2
-#     """
-#     latest_data = client.query(query).to_dataframe()
+#     # 3. Get Data from MongoDB
+#     client = MongoClient(os.getenv("MONGO_URI"))
+#     db = client[os.getenv("MONGO_DB_NAME")]
+#     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
     
-#     curr_aqi = latest_data.iloc[0]['aqi']
-#     prev_aqi = latest_data.iloc[1]['aqi']
+#     cursor = collection.find({"city": "Karachi"}).sort("timestamp", -1).limit(2)
+#     latest_data_list = list(cursor)
     
-#     # 3. Get the 72h Weather Forecast
+#     if len(latest_data_list) < 2:
+#         print("❌ Not enough data in MongoDB to calculate lag features.")
+#         return
+
+#     latest_row = latest_data_list[0]
+#     prev_row = latest_data_list[1]
+    
+#     # 4. Get Weather Forecast
 #     f_temps, f_winds = get_live_weather_forecast()
 
-#     # 4. Prepare Feature Row (Must match the training column order exactly!)
-#     # Base features
+#     # 5. Prepare Features
+#     # 5. Prepare Features (MATCHING TRAINING FEATURES)
+#     now = pd.Timestamp.now()
+    
+#     # Calculate some of the missing features
 #     input_data = {
-#         'temp': [latest_data.iloc[0]['temp']],
-#         'humidity': [latest_data.iloc[0]['humidity']],
-#         'wind_speed': [latest_data.iloc[0]['wind_speed']],
-#         'hour': [pd.Timestamp.now().hour],
-#         'day_of_week': [pd.Timestamp.now().dayofweek],
-#         'aqi_lag_1h': [curr_aqi],
-#         'aqi_change_rate': [(curr_aqi - prev_aqi) / (prev_aqi + 1e-6)]
+#         'temp': latest_row['temp'],
+#         'humidity': latest_row['humidity'],
+#         'wind_speed': latest_row['wind_speed'],
+#         'hour': now.hour,
+#         'day_of_week': now.dayofweek,
+#         'month': now.month,                                  # Added 'month'
+#         'is_winter': 1 if now.month in [11, 12, 1, 2] else 0, # Added 'is_winter'
+#         'aqi': latest_row['aqi'],                            # Added 'aqi'
+#         'aqi_lag_1h': latest_row['aqi'],
+#         'aqi_change_rate': (latest_row['aqi'] - prev_row['aqi']) / (prev_row['aqi'] + 1e-6),
+        
+#         # For rolling/index columns that the scaler expects but aren't useful for current prediction:
+#         'aqi_rolling_6h': latest_row['aqi'],                 # Fallback: use current aqi
+#         'actual_aqi_index': 0,                               # Placeholders to satisfy the scaler
+#         'target_day_1_aqi': 0,
+#         'target_day_2_aqi': 0,
+#         'target_day_3_aqi': 0
 #     }
 
-#     # Weather leads (the 72h forecast)
+#     # Add the 72h forecast temperatures and wind speeds
 #     for i in range(72):
-#         input_data[f'temp_f_{i+1}h'] = [f_temps[i]]
-#         input_data[f'wind_f_{i+1}h'] = [f_winds[i]]
+#         input_data[f'temp_f_{i+1}h'] = f_temps[i]
+#         input_data[f'wind_f_{i+1}h'] = f_winds[i]
 
-#     input_df = pd.DataFrame(input_data)
+#     input_df = pd.DataFrame([input_data])
     
-#     # 5. Scale and Predict
+#     # ⚠️ CRITICAL: Ensure all columns expected by the scaler exist
+#     # Even if they are targets, the scaler was fitted on them, so they must be present
+#     for col in scaler.feature_names_in_:
+#         if col not in input_df.columns:
+#             input_df[col] = 0  # Fill missing expected columns with 0
+    
+#     # Re-order features to match training expectations exactly
+#     input_df = input_df[list(scaler.feature_names_in_)]
+    
+#     # 6. Predict Hourly
 #     input_scaled = scaler.transform(input_df)
-#     prediction = model.predict(input_scaled, verbose=0)[0]
+#     hourly_preds = model.predict(input_scaled, verbose=0)[0]
 
-#     # 6. Display the result
-#     print("\n" + "="*30)
-#     print("🚀 KARACHI 72-HOUR AQI FORECAST")
-#     print("="*30)
+#     # --- 7. GROUP BY DAY ---
+#     print("\n" + "="*45)
+#     print("🚀 KARACHI 3-DAY AQI FORECAST (Daily Average)")
+#     print("="*45)
+    
 #     now = pd.Timestamp.now()
-#     for i, val in enumerate(prediction):
-#         # Only print every 6 hours to keep it clean, or print all
-#         forecast_time = (now + pd.Timedelta(hours=i+1)).strftime('%Y-%m-%d %H:00')
-#         print(f"{forecast_time} | Expected AQI: {val:.2f}")
+#     day_1 = hourly_preds[0:24]
+#     day_2 = hourly_preds[24:48]
+#     day_3 = hourly_preds[48:72]
+    
+#     daily_summaries = [
+#         ("Tomorrow", day_1.mean(), now + pd.Timedelta(days=1)),
+#         ("Day After Tomorrow", day_2.mean(), now + pd.Timedelta(days=2)),
+#         ("Third Day", day_3.mean(), now + pd.Timedelta(days=3))
+#     ]
+
+#     for label, avg_aqi, date in daily_summaries:
+#         status = "Good" if avg_aqi < 50 else "Moderate" if avg_aqi < 100 else "Unhealthy"
+#         date_str = date.strftime('%Y-%m-%d')
+#         print(f"{label:20} ({date_str}) | Avg AQI: {avg_aqi:6.2f} | {status}")
+    
+#     # --- 8. SAVE TO MONGODB ---
+#     print("📡 Saving predictions to MongoDB...")
+#     update_payload = {
+#         "timestamp": latest_row['timestamp'],  
+#         "actual_aqi_index": float(latest_row['aqi']),
+#         "target_day_1_aqi": float(daily_summaries[0][1]),
+#         "target_day_2_aqi": float(daily_summaries[1][1]),
+#         "target_day_3_aqi": float(daily_summaries[2][1]),
+#         "prediction_run_at": pd.Timestamp.now()
+#     }
+
+#     try:
+#         collection.update_one(
+#             {"_id": latest_row["_id"]}, 
+#             {"$set": update_payload},
+#             upsert=True
+#         )
+#         print("✅ Database updated successfully!")
+#     except Exception as e:
+#         print(f"❌ Failed to save to MongoDB: {e}")
 
 # if __name__ == "__main__":
 #     run_inference()
 
 import os
 import sys
-import requests
-import pandas as pd
 import joblib
+import pandas as pd
 import numpy as np
-import tensorflow as tf
+import requests
 from pymongo import MongoClient
 from dotenv import load_dotenv
-import mlflow
-import mlflow.keras
+from datetime import datetime
 
 # --- PATH FIX ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,144 +179,126 @@ load_dotenv(os.path.join(project_root, '.env'))
 def get_live_weather_forecast():
     """Fetches real 72-hour forecast for Karachi from Open-Meteo"""
     print("☁️ Fetching live weather forecast from Open-Meteo...")
-    url = "https://api.open-meteo.com/v1/forecast?latitude=24.8607&longitude=67.0011&hourly=temperature_2m,wind_speed_10m"
+    # Updated to include relative humidity for the Smog Index
+    url = "https://api.open-meteo.com/v1/forecast?latitude=24.8607&longitude=67.0011&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"
     res = requests.get(url).json()
-    return res['hourly']['temperature_2m'][:72], res['hourly']['wind_speed_10m'][:72]
+    h = res['hourly']
+    return h['temperature_2m'][:72], h['wind_speed_10m'][:72], h['relative_humidity_2m'][:72]
 
 def run_inference():
-    # 1. DagsHub / MLFLOW CONFIG
-    print("🚀 Connecting to DagsHub Model Registry...")
-    os.environ['MLFLOW_TRACKING_USERNAME'] = os.getenv("DAGSHUB_USERNAME")
-    os.environ['MLFLOW_TRACKING_PASSWORD'] = os.getenv("DAGSHUB_TOKEN")
-    
-    dagshub_url = f"https://dagshub.com/{os.getenv('DAGSHUB_USERNAME')}/{os.getenv('DAGSHUB_REPO_NAME')}.mlflow"
-    mlflow.set_tracking_uri(dagshub_url)
-
-    # 2. Load Model and Scaler
+    # 1. Load Model and Scaler from local /models folder
+    # Using XGBoost as it was the champion in your training run
     try:
-        # Load the model directly from DagsHub Registry
-        model_name = "AQI_ANN_72h"
-        model_version = "latest" 
-        model = mlflow.keras.load_model(model_uri=f"models:/{model_name}/{model_version}")
-        print("✅ Model loaded successfully from DagsHub!")
-        
-        # Scaler is usually kept locally or as an artifact
-        scaler_path = os.path.join(project_root, "models", "scaler.joblib")
-        if os.path.exists(scaler_path):
-            scaler = joblib.load(scaler_path)
-        else:
-            # Fallback: Try to download scaler from MLflow artifacts if you logged it there
-            print("⚠️ Local scaler not found, check your /models folder.")
-            return
-
+        models_dir = os.path.join(project_root, "models")
+        model = joblib.load(os.path.join(models_dir, "best_xgb.joblib"))
+        scaler = joblib.load(os.path.join(models_dir, "scaler.joblib"))
+        print("✅ XGBoost Model and Scaler loaded locally!")
     except Exception as e:
-        print(f"❌ ERROR loading model/scaler: {e}")
+        print(f"❌ ERROR loading models: {e}")
         return
 
-    # 3. Get Data from MongoDB
+    # 2. Get Data from MongoDB
     client = MongoClient(os.getenv("MONGO_URI"))
     db = client[os.getenv("MONGO_DB_NAME")]
     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
     
-    cursor = collection.find({"city": "Karachi"}).sort("timestamp", -1).limit(2)
-    latest_data_list = list(cursor)
+    # We need the last few records to calculate rolling averages and lags
+    cursor = collection.find({"city": "Karachi"}).sort("timestamp", -1).limit(10)
+    history = list(cursor)
     
-    if len(latest_data_list) < 2:
-        print("❌ Not enough data in MongoDB to calculate lag features.")
+    if len(history) < 6:
+        print("❌ Not enough historical data in MongoDB (need at least 6 hours).")
         return
 
-    latest_row = latest_data_list[0]
-    prev_row = latest_data_list[1]
+    latest_row = history[0]
     
-    # 4. Get Weather Forecast
-    f_temps, f_winds = get_live_weather_forecast()
+    # 3. Get Weather Forecast for the next 72h
+    f_temps, f_winds, f_humids = get_live_weather_forecast()
 
-    # 5. Prepare Features
-    # 5. Prepare Features (MATCHING TRAINING FEATURES)
-    now = pd.Timestamp.now()
+    # 4. Prepare Features (MUST MATCH feature_engineering.py EXACTLY)
+    now = datetime.now()
     
-    # Calculate some of the missing features
+    # Calculate Cyclic Time
+    hour = now.hour
+    hour_sin = np.sin(2 * np.pi * hour / 24)
+    hour_cos = np.cos(2 * np.pi * hour / 24)
+    
+    # Calculate Smog Index
+    is_winter = 1 if now.month in [11, 12, 1, 2] else 0
+    smog_idx = (latest_row['humidity'] / (latest_row['wind_speed'] + 1)) * is_winter
+
+    # Calculate Lags and Rolling from MongoDB history
+    aqi_history = [h['aqi_calibrated'] for h in history]
+    aqi_lag_1h = aqi_history[0]
+    aqi_lag_2h = aqi_history[1]
+    aqi_rolling_6h = np.mean(aqi_history[:6])
+    aqi_change_rate = (aqi_lag_1h - aqi_lag_2h) / (aqi_lag_2h + 0.1)
+
+    # Construct feature dictionary
     input_data = {
+        'aqi_calibrated': latest_row['aqi_calibrated'],
         'temp': latest_row['temp'],
         'humidity': latest_row['humidity'],
         'wind_speed': latest_row['wind_speed'],
-        'hour': now.hour,
-        'day_of_week': now.dayofweek,
-        'month': now.month,                                  # Added 'month'
-        'is_winter': 1 if now.month in [11, 12, 1, 2] else 0, # Added 'is_winter'
-        'aqi': latest_row['aqi'],                            # Added 'aqi'
-        'aqi_lag_1h': latest_row['aqi'],
-        'aqi_change_rate': (latest_row['aqi'] - prev_row['aqi']) / (prev_row['aqi'] + 1e-6),
-        
-        # For rolling/index columns that the scaler expects but aren't useful for current prediction:
-        'aqi_rolling_6h': latest_row['aqi'],                 # Fallback: use current aqi
-        'actual_aqi_index': 0,                               # Placeholders to satisfy the scaler
-        'target_day_1_aqi': 0,
-        'target_day_2_aqi': 0,
-        'target_day_3_aqi': 0
+        'hour_sin': hour_sin,
+        'hour_cos': hour_cos,
+        'is_winter': is_winter,
+        'smog_index': smog_idx,
+        'aqi_rolling_6h': aqi_rolling_6h,
+        'aqi_lag_1h': aqi_lag_1h,
+        'aqi_change_rate': aqi_change_rate
     }
 
-    # Add the 72h forecast temperatures and wind speeds
+    # Add 72h Forecast features (temp_f_1h, wind_f_1h, etc.)
     for i in range(72):
         input_data[f'temp_f_{i+1}h'] = f_temps[i]
         input_data[f'wind_f_{i+1}h'] = f_winds[i]
 
+    # Convert to DataFrame and align with scaler
     input_df = pd.DataFrame([input_data])
     
-    # ⚠️ CRITICAL: Ensure all columns expected by the scaler exist
-    # Even if they are targets, the scaler was fitted on them, so they must be present
-    for col in scaler.feature_names_in_:
+    # Align columns with what the scaler expects (this fixes NameErrors)
+    expected_features = list(scaler.feature_names_in_)
+    for col in expected_features:
         if col not in input_df.columns:
-            input_df[col] = 0  # Fill missing expected columns with 0
-    
-    # Re-order features to match training expectations exactly
-    input_df = input_df[list(scaler.feature_names_in_)]
-    
-    # 6. Predict Hourly
-    input_scaled = scaler.transform(input_df)
-    hourly_preds = model.predict(input_scaled, verbose=0)[0]
+            input_df[col] = 0
+            
+    input_df = input_df[expected_features]
 
-    # --- 7. GROUP BY DAY ---
-    print("\n" + "="*45)
-    print("🚀 KARACHI 3-DAY AQI FORECAST (Daily Average)")
-    print("="*45)
+    # 5. Predict
+    input_scaled = scaler.transform(input_df)
+    hourly_preds = model.predict(input_scaled)[0]
+
+    # 6. Display Results
+    print("\n" + "="*50)
+    print(f"🌍 KARACHI AQI FORECAST - Generated at {now.strftime('%H:%M')}")
+    print("="*50)
     
-    now = pd.Timestamp.now()
-    day_1 = hourly_preds[0:24]
-    day_2 = hourly_preds[24:48]
-    day_3 = hourly_preds[48:72]
-    
-    daily_summaries = [
-        ("Tomorrow", day_1.mean(), now + pd.Timedelta(days=1)),
-        ("Day After Tomorrow", day_2.mean(), now + pd.Timedelta(days=2)),
-        ("Third Day", day_3.mean(), now + pd.Timedelta(days=3))
+    daily_avgs = [
+        ("Tomorrow", np.mean(hourly_preds[0:24])),
+        ("Day 2", np.mean(hourly_preds[24:48])),
+        ("Day 3", np.mean(hourly_preds[48:72]))
     ]
 
-    for label, avg_aqi, date in daily_summaries:
-        status = "Good" if avg_aqi < 50 else "Moderate" if avg_aqi < 100 else "Unhealthy"
-        date_str = date.strftime('%Y-%m-%d')
-        print(f"{label:20} ({date_str}) | Avg AQI: {avg_aqi:6.2f} | {status}")
-    
-    # --- 8. SAVE TO MONGODB ---
-    print("📡 Saving predictions to MongoDB...")
+    for label, avg in daily_avgs:
+        # EPA Category Logic
+        status = "Good" if avg <= 50 else "Moderate" if avg <= 100 else "Unhealthy"
+        if avg > 150: status = "VERY Unhealthy"
+        print(f"📅 {label:12} | Predicted Avg AQI: {avg:6.2f} | [{status}]")
+
+    # 7. Save prediction back to the most recent record
+    # This allows your dashboard to show "Actual vs Predicted"
     update_payload = {
-        "timestamp": latest_row['timestamp'],  
-        "actual_aqi_index": float(latest_row['aqi']),
-        "target_day_1_aqi": float(daily_summaries[0][1]),
-        "target_day_2_aqi": float(daily_summaries[1][1]),
-        "target_day_3_aqi": float(daily_summaries[2][1]),
-        "prediction_run_at": pd.Timestamp.now()
+        "is_predicted": True,
+        "predicted_72h": hourly_preds.tolist(),
+        "prediction_run_at": datetime.now()
     }
 
     try:
-        collection.update_one(
-            {"_id": latest_row["_id"]}, 
-            {"$set": update_payload},
-            upsert=True
-        )
-        print("✅ Database updated successfully!")
+        collection.update_one({"_id": latest_row["_id"]}, {"$set": update_payload})
+        print("\n✅ Predictions saved to MongoDB for latest record.")
     except Exception as e:
-        print(f"❌ Failed to save to MongoDB: {e}")
+        print(f"❌ Database update failed: {e}")
 
 if __name__ == "__main__":
     run_inference()
