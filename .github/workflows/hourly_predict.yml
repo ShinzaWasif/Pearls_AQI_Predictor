@@ -61,7 +61,7 @@ jobs:
           MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
           MONGO_COLLECTION_NAME: ${{ secrets.MONGO_COLLECTION_NAME }}
           # If your feature pipeline needs Open-Meteo or other APIs, add keys here
-        run: python scripts/feature_pipeline.py
+        run: python pipelines/feature_pipeline.py
 
       # --- PREDICTION RUNS AFTER DATA IS UPDATED ---
       - name: Run Prediction
