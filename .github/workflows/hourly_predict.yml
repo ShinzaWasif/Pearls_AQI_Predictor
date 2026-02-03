@@ -1,9 +1,42 @@
-name: Hourly AQI Prediction
+# name: Hourly AQI Prediction
+
+# on:
+#   schedule:
+#     - cron: "0 * * * *" # Runs at the start of every hour
+#   workflow_dispatch: # Allows you to run it manually for testing
+
+# jobs:
+#   predict:
+#     runs-on: ubuntu-latest
+#     steps:
+#       - name: Checkout Code
+#         uses: actions/checkout@v3
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v4
+#         with:
+#           python-version: "3.10"
+
+#       - name: Install Dependencies
+#         run: |
+#           pip install -r requirements.txt
+
+#       - name: Run Prediction
+#         env:
+#           MONGO_URI: ${{ secrets.MONGO_URI }}
+#           MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+#           MONGO_COLLECTION_NAME: ${{ secrets.MONGO_COLLECTION_NAME }}
+#           DAGSHUB_USERNAME: ${{ secrets.DAGSHUB_USERNAME }}
+#           DAGSHUB_TOKEN: ${{ secrets.DAGSHUB_TOKEN }}
+#           DAGSHUB_REPO_NAME: ${{ secrets.DAGSHUB_REPO_NAME }}
+#         run: python scripts/predict.py
+
+name: Hourly AQI Pipeline
 
 on:
   schedule:
     - cron: "0 * * * *" # Runs at the start of every hour
-  workflow_dispatch: # Allows you to run it manually for testing
+  workflow_dispatch:
 
 jobs:
   predict:
@@ -21,6 +54,16 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      # --- NEW STEP: FEATURE PIPELINE ---
+      - name: Run Feature Pipeline
+        env:
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          MONGO_DB_NAME: ${{ secrets.MONGO_DB_NAME }}
+          MONGO_COLLECTION_NAME: ${{ secrets.MONGO_COLLECTION_NAME }}
+          # If your feature pipeline needs Open-Meteo or other APIs, add keys here
+        run: python scripts/feature_pipeline.py
+
+      # --- PREDICTION RUNS AFTER DATA IS UPDATED ---
       - name: Run Prediction
         env:
           MONGO_URI: ${{ secrets.MONGO_URI }}
