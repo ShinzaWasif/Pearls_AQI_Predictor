@@ -27,3 +27,4 @@ data/
 *.log
 *.csv
 extra.py
+delete.py

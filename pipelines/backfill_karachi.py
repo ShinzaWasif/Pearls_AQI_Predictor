@@ -1,156 +1,217 @@
-
 # import os
 # import sys
 # import requests
 # import pandas as pd
+# import numpy as np
 # from pymongo import MongoClient, UpdateOne
 # from dotenv import load_dotenv
 
 # # --- PATH FIX ---
-# # Ensures the script can find 'src' regardless of where it's run from
 # project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # sys.path.append(project_root)
 # load_dotenv(os.path.join(project_root, '.env'))
 
+# # This now imports the updated logic with EPA formula and Smog Index
 # from src.feature_engineering import compute_features
 
 # def fetch_weather_and_aq(lat, lon, start, end):
+#     """Fetches historical PM2.5 and Weather data for backfilling."""
 #     print(f"📡 Fetching historical data for Karachi ({start} to {end})...")
-#     # Air Quality API
-#     aq_url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&hourly=pm2_5&start_date={start}&end_date={end}"
-#     # Weather Archive API
-#     w_url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&start_date={start}&end_date={end}"
     
-#     aq_res = requests.get(aq_url).json()
-#     w_res = requests.get(w_url).json()
-
-#     df = pd.DataFrame({
-#         "timestamp": pd.to_datetime(aq_res["hourly"]["time"]),
-#         "aqi": aq_res["hourly"]["pm2_5"],
-#         "temp": w_res["hourly"]["temperature_2m"],
-#         "humidity": w_res["hourly"]["relative_humidity_2m"],
-#         "wind_speed": w_res["hourly"]["wind_speed_10m"]
-#     })
-#     return df
-
-# def run_pipeline():
-#     # 1. Fetch Raw Data 
-#     # To get ~5 months of data, we go from August 2025 to late Jan 2026
-#     df = fetch_weather_and_aq(24.8607, 67.0011, "2025-08-01", "2026-01-24")
+#     # 1. Air Quality API (PM2.5)
+#     aq_url = (f"https://air-quality-api.open-meteo.com/v1/air-quality?"
+#               f"latitude={lat}&longitude={lon}&hourly=pm2_5&"
+#               f"start_date={start}&end_date={end}")
     
-#     # 2. Compute Features
-#     print("🛠️ Computing multi-output features and 72h leads...")
-#     df_features = compute_features(df)
-#     df_features['city'] = "Karachi"
+#     # 2. Weather Archive API (Met Data)
+#     w_url = (f"https://archive-api.open-meteo.com/v1/archive?"
+#              f"latitude={lat}&longitude={lon}&hourly=temperature_2m,"
+#              f"relative_humidity_2m,wind_speed_10m&"
+#              f"start_date={start}&end_date={end}")
     
-#     # Making sure timestamp is clean for Mongo
-#     df_features['timestamp'] = pd.to_datetime(df_features['timestamp'])
+#     try:
+#         aq_res = requests.get(aq_url).json()
+#         w_res = requests.get(w_url).json()
 
-#     # Keeping every column as requested
-#     df_final = df_features.copy()
+#         if "hourly" not in aq_res or "hourly" not in w_res:
+#             print("❌ Error: API response invalid.")
+#             return pd.DataFrame()
 
-#     # 3. Store in MongoDB (Replacing BigQuery)
+#         df = pd.DataFrame({
+#             "timestamp": pd.to_datetime(aq_res["hourly"]["time"]),
+#             "aqi": aq_res["hourly"]["pm2_5"], # Input for compute_features
+#             "temp": w_res["hourly"]["temperature_2m"],
+#             "humidity": w_res["hourly"]["relative_humidity_2m"],
+#             "wind_speed": w_res["hourly"]["wind_speed_10m"]
+#         })
+#         return df
+#     except Exception as e:
+#         print(f"❌ API Request failed: {e}")
+#         return pd.DataFrame()
+
+# def run_backfill():
+#     # 1. Fetch Raw Data (August 2025 to Present)
+#     # We fetch a slightly larger window to ensure the rolling/shift logic has buffers
+#     df_raw = fetch_weather_and_aq(24.8607, 67.0011, "2025-08-01", "2026-02-01")
+    
+#     if df_raw.empty:
+#         print("⚠️ No data fetched. Check API or dates.")
+#         return
+
+#     # 2. Compute Features (EPA Formula, Smog Index, 72h Leads)
+#     print("🛠️ Computing EPA-calibrated features and 72h future targets...")
+#     df_final = compute_features(df_raw)
+    
+#     df_final['city'] = "Karachi"
+#     df_final['timestamp'] = pd.to_datetime(df_final['timestamp'])
+
+#     # 3. MongoDB Connection
 #     mongo_uri = os.getenv("MONGO_URI")
 #     db_name = os.getenv("MONGO_DB_NAME")
 #     col_name = os.getenv("MONGO_COLLECTION_NAME")
 
 #     try:
-#         print(f"🔌 Connecting to MongoDB Cluster...")
+#         print(f"🔌 Connecting to MongoDB: {db_name}...")
 #         client = MongoClient(mongo_uri)
 #         db = client[db_name]
 #         collection = db[col_name]
         
-#         # 4. Prepare Bulk Upsert
-#         print(f"📤 Preparing to upload {len(df_final)} records with {len(df_final.columns)} columns...")
+#         # 4. Prepare Bulk Upsert (Using $set to avoid overwriting existing metadata)
+#         print(f"📤 Syncing {len(df_final)} historical records to MongoDB...")
         
 #         ops = [
 #             UpdateOne(
 #                 filter={"timestamp": row["timestamp"], "city": row["city"]},
-#                 update={"$set": row},
+#                 update={"$set": row.to_dict()},
 #                 upsert=True
-#             ) for row in df_final.to_dict('records')
+#             ) for _, row in df_final.iterrows()
 #         ]
 
 #         if ops:
-#             # We use bulk_write because with 3,000+ records, individual inserts are too slow
 #             result = collection.bulk_write(ops)
-#             print(f"✅ Successfully stored 5-month dataset in MongoDB!")
+#             print(f"✅ Backfill Complete!")
 #             print(f"📊 Stats: {result.upserted_count} new records, {result.modified_count} updated.")
             
 #     except Exception as e:
 #         print(f"❌ MongoDB Error: {e}")
 
 # if __name__ == "__main__":
-#     run_pipeline()
+#     run_backfill()
 
 import os
 import sys
 import requests
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 from pymongo import MongoClient, UpdateOne
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- PATH FIX ---
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 load_dotenv(os.path.join(project_root, '.env'))
 
-# This now imports the updated logic with EPA formula and Smog Index
+# This imports the updated logic with EPA formula and Smog Index
 from src.feature_engineering import compute_features
 
+# --- ROBUST SESSION CONFIG ---
+def get_robust_session():
+    """Creates a requests session with built-in retries and backoff."""
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,  # Waits 1s, 2s, 4s between retries
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
 def fetch_weather_and_aq(lat, lon, start, end):
-    """Fetches historical PM2.5 and Weather data for backfilling."""
-    print(f"📡 Fetching historical data for Karachi ({start} to {end})...")
+    """Fetches historical PM2.5 and Weather data with error handling."""
+    session = get_robust_session()
     
-    # 1. Air Quality API (PM2.5)
     aq_url = (f"https://air-quality-api.open-meteo.com/v1/air-quality?"
               f"latitude={lat}&longitude={lon}&hourly=pm2_5&"
               f"start_date={start}&end_date={end}")
     
-    # 2. Weather Archive API (Met Data)
+    # Using the archive-api for historical weather
     w_url = (f"https://archive-api.open-meteo.com/v1/archive?"
              f"latitude={lat}&longitude={lon}&hourly=temperature_2m,"
              f"relative_humidity_2m,wind_speed_10m&"
              f"start_date={start}&end_date={end}")
     
     try:
-        aq_res = requests.get(aq_url).json()
-        w_res = requests.get(w_url).json()
+        # Added a 60-second timeout to handle large server-side processing
+        aq_res = session.get(aq_url, timeout=60).json()
+        w_res = session.get(w_url, timeout=60).json()
 
         if "hourly" not in aq_res or "hourly" not in w_res:
-            print("❌ Error: API response invalid.")
+            print(f"⚠️ Warning: Missing hourly data for range {start} to {end}")
             return pd.DataFrame()
 
         df = pd.DataFrame({
             "timestamp": pd.to_datetime(aq_res["hourly"]["time"]),
-            "aqi": aq_res["hourly"]["pm2_5"], # Input for compute_features
+            "aqi": aq_res["hourly"]["pm2_5"], 
             "temp": w_res["hourly"]["temperature_2m"],
             "humidity": w_res["hourly"]["relative_humidity_2m"],
             "wind_speed": w_res["hourly"]["wind_speed_10m"]
         })
         return df
     except Exception as e:
-        print(f"❌ API Request failed: {e}")
+        print(f"❌ API Request failed for {start} to {end}: {e}")
         return pd.DataFrame()
 
 def run_backfill():
-    # 1. Fetch Raw Data (August 2025 to Present)
-    # We fetch a slightly larger window to ensure the rolling/shift logic has buffers
-    df_raw = fetch_weather_and_aq(24.8607, 67.0011, "2025-08-01", "2026-02-01")
+    # 1. Configuration for Batching
+    lat, lon = 24.8607, 67.0011
+    start_date = datetime.strptime("2025-08-01", "%Y-%m-%d")
+    end_date = datetime.strptime("2026-02-01", "%Y-%m-%d")
     
-    if df_raw.empty:
-        print("⚠️ No data fetched. Check API or dates.")
+    all_chunks = []
+    current_start = start_date
+
+    print(f"🚀 Starting Batch Backfill: {start_date.date()} to {end_date.date()}")
+
+    # 2. Fetch Data in 30-Day Chunks (Prevents Timeout)
+    while current_start < end_date:
+        current_end = min(current_start + timedelta(days=30), end_date)
+        
+        s_str = current_start.strftime("%Y-%m-%d")
+        e_str = current_end.strftime("%Y-%m-%d")
+        
+        print(f"📡 Fetching chunk: {s_str} to {e_str}...")
+        df_chunk = fetch_weather_and_aq(lat, lon, s_str, e_str)
+        
+        if not df_chunk.empty:
+            all_chunks.append(df_chunk)
+            print(f"✅ Chunk loaded ({len(df_chunk)} rows)")
+        
+        current_start = current_end + timedelta(days=1)
+
+    if not all_chunks:
+        print("⚠️ No data fetched. Check API or internet connection.")
         return
 
-    # 2. Compute Features (EPA Formula, Smog Index, 72h Leads)
-    print("🛠️ Computing EPA-calibrated features and 72h future targets...")
-    df_final = compute_features(df_raw)
+    # Combine all chunks
+    df_raw = pd.concat(all_chunks).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+
+    # 3. Compute Features
+    print(f"🛠️ Computing features for {len(df_raw)} total records...")
+    df_final = compute_features(df_raw, training_mode=True)
     
+    if df_final.empty:
+        print("⚠️ No records after processing.")
+        return
+
     df_final['city'] = "Karachi"
     df_final['timestamp'] = pd.to_datetime(df_final['timestamp'])
 
-    # 3. MongoDB Connection
+    # 4. MongoDB Sync
     mongo_uri = os.getenv("MONGO_URI")
     db_name = os.getenv("MONGO_DB_NAME")
     col_name = os.getenv("MONGO_COLLECTION_NAME")
@@ -161,8 +222,7 @@ def run_backfill():
         db = client[db_name]
         collection = db[col_name]
         
-        # 4. Prepare Bulk Upsert (Using $set to avoid overwriting existing metadata)
-        print(f"📤 Syncing {len(df_final)} historical records to MongoDB...")
+        print(f"📤 Syncing {len(df_final)} records...")
         
         ops = [
             UpdateOne(
