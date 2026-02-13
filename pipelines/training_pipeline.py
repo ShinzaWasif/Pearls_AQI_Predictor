@@ -254,7 +254,6 @@ def run_training():
     db = client[os.getenv("MONGO_DB_NAME")]
     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
     
-    # --- FIX 1: Only fetch data that has targets (ignores the "Future Forecast" rows) ---
     cursor = collection.find({"city": "Karachi", "target_aqi_72h": {"$exists": True}})
     df = pd.DataFrame(list(cursor))
     
@@ -264,8 +263,6 @@ def run_training():
 
     # 2. Feature & Target Selection
     target_cols = [f'target_aqi_{i}h' for i in range(1, 73)]
-    
-    # --- FIX 2: Added 'aqi_calibrated' to drop_cols so the model doesn't cheat ---
     drop_cols = ['_id', 'timestamp', 'city', 'aqi', 'aqi_calibrated'] + target_cols
     
     X = df.drop(columns=[c for c in drop_cols if c in df.columns]).select_dtypes(include=['number'])
@@ -310,61 +307,42 @@ def run_training():
 
         for name, model in model_objs.items():
             preds = model.predict(X_test)
-            
-            # --- CALCULATE 5 METRICS ---
             mae = mean_absolute_error(y_test, preds)
             rmse = np.mean(np.sqrt(mean_squared_error(y_test, preds, multioutput='raw_values')))
             r2 = r2_score(y_test, preds)
             mape = mean_absolute_percentage_error(y_test, preds)
             medae = median_absolute_error(y_test, preds)
             
-            # --- LOG TO MLFLOW ---
             mlflow.log_metric(f"{name}_MAE", mae)
             mlflow.log_metric(f"{name}_RMSE", rmse)
             mlflow.log_metric(f"{name}_R2", r2)
             mlflow.log_metric(f"{name}_MAPE", mape)
             mlflow.log_metric(f"{name}_MedAE", medae)
             
-            # Store for Database & Selection
             results_mae[name] = mae
             full_metrics_for_db[name] = {
-                "MAE": float(mae),
-                "RMSE": float(rmse),
-                "R2": float(r2),
-                "MAPE": float(mape),
-                "MedAE": float(medae)
+                "MAE": float(mae), "RMSE": float(rmse), "R2": float(r2),
+                "MAPE": float(mape), "MedAE": float(medae)
             }
             
-            # --- TERMINAL REPORT ---
-            print(f"📊 MODEL: {name}")
-            print(f"   🔹 MAE:   {mae:.2f} (Avg error)")
-            print(f"   🔹 RMSE:  {rmse:.2f} (Penalty for outliers)")
-            print(f"   🔹 MAPE:  {mape*100:.2f}% (Percent error)")
-            print(f"   🔹 R2:    {r2:.2f}")
-            print(f"   🔹 MedAE: {medae:.2f} (Robust error)")
-            print("-" * 30)
+            print(f"📊 MODEL: {name}\n   🔹 MAE: {mae:.2f} | 🔹 R2: {r2:.2f}")
 
-        print("="*50)
+        # 5. REGISTRY LOGGING (SCALER & CHAMPION)
+        # Save scaler temporarily for logging, then delete
+        temp_scaler_path = "scaler.joblib"
+        joblib.dump(scaler, temp_scaler_path)
+        mlflow.log_artifact(temp_scaler_path)
+        os.remove(temp_scaler_path)
 
-        # 5. LOCAL SAVING
-        models_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-        os.makedirs(models_dir, exist_ok=True)
-        joblib.dump(scaler, os.path.join(models_dir, "scaler.joblib"))
-        joblib.dump(xgb_model, os.path.join(models_dir, "best_xgb.joblib"))
-        ann_model.save(os.path.join(models_dir, "best_ann.keras"))
-        lstm_model.save(os.path.join(models_dir, "best_lstm.keras"))
-        mlflow.log_artifact(os.path.join(models_dir, "scaler.joblib"))
-
-        # 6. CHAMPION SELECTION & REGISTRY
         best_model_name = min(results_mae, key=results_mae.get)
         print(f"🏆 Champion Model: {best_model_name}")
 
         if best_model_name == "XGBoost":
             mlflow.sklearn.log_model(xgb_model, "best_model", registered_model_name="AQI_72h_Karachi")
-        else: # Deep Learning models (ANN or LSTM)
+        else:
             mlflow.keras.log_model(model_objs[best_model_name], "best_model", registered_model_name="AQI_72h_Karachi")
 
-        # 7. SAVE ALL METRICS TO MONGODB
+        # 6. SAVE ALL METRICS TO MONGODB
         print("💾 Saving training metadata to MongoDB...")
         performance_audit = {
             "timestamp": datetime.now(),
