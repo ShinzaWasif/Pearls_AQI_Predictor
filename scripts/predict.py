@@ -326,7 +326,7 @@ dagshub_url = f"https://dagshub.com/{os.getenv('DAGSHUB_USERNAME')}/{os.getenv('
 mlflow.set_tracking_uri(dagshub_url)
 
 def run_inference():
-    # 1. LOAD MODEL FROM REGISTRY
+    # 1. LOAD MODEL AND SCALER FROM REGISTRY
     try:
         model_name = "AQI_72h_Karachi"
         model_uri = f"models:/{model_name}/latest"
@@ -334,11 +334,19 @@ def run_inference():
         print(f"📡 Connecting to DagsHub Registry: {model_uri}...")
         model = mlflow.pyfunc.load_model(model_uri)
         
-        models_dir = os.path.join(project_root, "models")
-        scaler = joblib.load(os.path.join(models_dir, "scaler.joblib"))
-        print("✅ Registry Model and Local Scaler loaded successfully!")
+        # --- NEW LOGIC: FETCH SCALER FROM MLFLOW ARTIFACTS ---
+        client = mlflow.tracking.MlflowClient()
+        # Get the latest version to find the Run ID
+        latest_version = client.get_latest_versions(model_name, stages=["None"])[0]
+        run_id = latest_version.run_id
+        
+        print(f"📦 Downloading scaler from Run ID: {run_id}...")
+        scaler_path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="scaler.joblib")
+        scaler = joblib.load(scaler_path)
+        
+        print("✅ Registry Model and Remote Scaler loaded successfully!")
     except Exception as e:
-        print(f"❌ ERROR connecting to Model Registry: {e}")
+        print(f"❌ ERROR connecting to Registry/Artifacts: {e}")
         return
 
     # 2. Get the PRE-COMPUTED row from MongoDB
@@ -346,28 +354,19 @@ def run_inference():
     db = client[os.getenv("MONGO_DB_NAME")]
     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
     
-    # We grab the latest row that was processed by the Feature Pipeline
-    # It already contains the weather forecast, rolling averages, and smog index!
     latest_row = collection.find_one({"city": "Karachi"}, sort=[("timestamp", -1)])
     
     if not latest_row:
         print("❌ No data found in MongoDB.")
         return
 
-    # 3. Prepare Features (Using Pre-computed data)
-    # We only need to align the columns to what the scaler expects
+    # 3. Prepare Features
     target_cols = [f'target_aqi_{i}h' for i in range(1, 73)]
-    drop_cols = ['_id', 'timestamp', 'city', 'aqi', 'aqi_calibrated', 'is_predicted', 'predicted_72h'] + target_cols
+    expected_features = list(scaler.feature_names_in_)
     
     input_df = pd.DataFrame([latest_row])
     
-    # Ensure we only have numeric features that were used in training
-    expected_features = list(scaler.feature_names_in_)
-    # Temporary debug lines
-    print(f"DEBUG: Scaler expects {len(expected_features)} features.")
-    print(f"DEBUG: Features are: {expected_features}")
-    
-    # Fill any missing columns with 0 and filter for model features
+    # Fill missing columns and filter
     for col in expected_features:
         if col not in input_df.columns:
             input_df[col] = 0
@@ -381,7 +380,6 @@ def run_inference():
     if len(hourly_preds.shape) > 1:
         hourly_preds = hourly_preds[0]
 
-    # Ensure no negative predictions (AQI can't be below 0)
     hourly_preds = np.maximum(hourly_preds, 0)
 
     # 5. DISPLAY & SAVE
@@ -400,7 +398,6 @@ def run_inference():
         if avg > 150: status = "Hazardous"
         print(f"📅 {label:12} | Avg AQI: {avg:6.2f} | [{status}]")
 
-    # Update the EXACT row in MongoDB with the results
     update_payload = {
         "is_predicted": True,
         "predicted_72h": hourly_preds.tolist(),
