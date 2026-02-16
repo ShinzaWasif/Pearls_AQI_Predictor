@@ -1,12 +1,25 @@
+# --- Core Frameworks ---
+streamlit
 pandas
 numpy
+
+# --- Machine Learning ---
+scikit-learn
+xgboost
+tensorflow
+joblib
+
+# --- MLOps (DagsHub/MLflow) ---
+mlflow
+dagshub
+
+# --- Database & API ---
 pymongo
 python-dotenv
 requests
-joblib
-tensorflow
-streamlit
-mlflow
-scikit-learn
-xgboost
-dagshub
+urllib3
+
+# --- Visualization ---
+plotly
+
+
