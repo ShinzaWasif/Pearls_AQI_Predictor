@@ -183,7 +183,7 @@ with c_perf:
     if performance:
         m_dict = performance.get("metrics", {})
         champ = performance.get("champion_model", "XGBoost")
-        rows = [{"Model": (n if n != champ else "Champion " + n), "MAE": round(v.get('MAE',0),2), "R2": round(v.get('R2',0),2), "MedAE": round(v.get('MedAE',0),2)} for n, v in m_dict.items()]
+        rows = [{"Model": (n if n != champ else "Champion " + n), "MAE": round(v.get('MAE',0),2), "R2": round(v.get('R2',0),2), "MAPE (%)": f"{round(v.get('MAPE', 0), 2)}%"} for n, v in m_dict.items()]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # --- SIDEBAR ---
