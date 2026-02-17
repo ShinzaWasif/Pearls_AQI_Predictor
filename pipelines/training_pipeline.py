@@ -319,13 +319,16 @@ def run_training():
             
             mlflow.log_metric(f"{name}_MAE", mae)
             mlflow.log_metric(f"{name}_R2", r2)
+            mlflow.log_metric(f"{name}_RMSE", rmse)
+            mlflow.log_metric(f"{name}_MAPE", mape)
+
             
             results_mae[name] = mae
             full_metrics_for_db[name] = {
                 "MAE": float(mae), "RMSE": float(rmse), "R2": float(r2), "MAPE": float(mape)
             }
             
-            print(f"📊 MODEL: {name}\n   🔹 MAE: {mae:.2f} | 🔹 R2: {r2:.2f}")
+            print(f"📊 MODEL: {name}\n   🔹 MAE: {mae:.2f} | 🔹 R2: {r2:.2f} ")
 
         # 5. REGISTRY LOGGING (SCALER & CHAMPION)
         # We save the scaler so the Prediction Script can use the exact same normalization

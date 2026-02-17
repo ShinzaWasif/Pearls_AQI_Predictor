@@ -5,17 +5,18 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from pymongo import MongoClient
+import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-
+import pytz
 # --- CONFIG ---
-st.set_page_config(page_title="Karachi Smog Watch PRO", page_icon="🌬️", layout="wide")
+st.set_page_config(page_title="Karachi AQI Predictor", page_icon="🌬️", layout="wide")
 load_dotenv()
 
 # --- DYNAMIC CORRECTION LOGIC ---
 def get_dynamic_aqi(raw_aqi, humidity):
-    """Adjusts the 1.42 base factor based on Karachi's coastal humidity."""
-    base_factor = 1.42
+    """Adjusts the 1.25 base factor based on Karachi's coastal humidity."""
+    base_factor = 1.25
     if humidity > 85:
         # High moisture often causes sensor over-reading; we dampen the boost
         factor = base_factor * 0.85 
@@ -98,8 +99,24 @@ latest_data = aqi_list[0]
 prev_data = aqi_list[1] if len(aqi_list) > 1 else latest_data
 
 # --- UI: TOP SECTION ---
-ts = latest_data.get('timestamp', datetime.now())
-st.title("🌬️ Karachi Real-Time Smog Tracker")
+# 1. Get raw timestamp from MongoDB
+ts_raw = latest_data.get('timestamp', datetime.now())
+
+# 2. Check if we are on the Cloud (UTC) or Local (PKT)
+# time.timezone is the offset in seconds. UTC is 0. 
+# Karachi (UTC+5) is -18000 seconds.
+is_utc_server = (time.timezone == 0)
+
+if is_utc_server:
+    # We are on the Cloud! Convert 10 AM UTC -> 3 PM PKT
+    karachi_tz = pytz.timezone("Asia/Karachi")
+    if ts_raw.tzinfo is None:
+        ts_raw = pytz.utc.localize(ts_raw)
+    ts = ts_raw.astimezone(karachi_tz)
+else:
+    # We are Local! It's already 3 PM, so just keep it as is.
+    ts = ts_raw
+st.title("🌬️ Karachi Real-Time AQI Predictor")
 
 # FIX: Check for 'aqi_calibrated' from DB first to get the 80s range
 if 'aqi_calibrated' in latest_data:
@@ -177,16 +194,57 @@ with c_perf:
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # --- SIDEBAR ---
+# --- HELPER FUNCTION FOR AQI CATEGORY ---
+def get_aqi_category(aqi):
+    if aqi <= 50:
+        return "Good", "#00e400", "🟢"
+    elif aqi <= 100:
+        return "Moderate", "#ffff00", "🟡"
+    elif aqi <= 150:
+        return "Unhealthy for Sensitive Groups", "#ff7e00", "🟠"
+    elif aqi <= 200:
+        return "Unhealthy", "#ff0000", "🔴"
+    elif aqi <= 300:
+        return "Very Unhealthy", "#8f3f97", "🟣"
+    else:
+        return "Hazardous", "#7e0023", "🟤"
+
+# --- SIDEBAR ---
+# --- SIDEBAR ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Controls")
+    # --- REGULAR SIDEBAR CONTROLS ---
     if performance:
-        st.success(f"Active Model: {performance.get('champion_model', 'XGBoost')}")
+        st.success(f"🏆 Active Model: {performance.get('champion_model', 'XGBoost')}")
+    
     if st.button("🔄 Refresh Dashboard"):
         st.cache_data.clear()
         st.rerun()
     st.divider()
-    show_table = st.checkbox("📅 View Past 7 Days (Excl. Predictions)")
 
+    # --- STATIC AQI REFERENCE TABLE ---
+    st.subheader("📊 AQI Health Levels")
+    
+    # Using a clean Markdown Table - no risk of raw HTML tags showing up
+    st.markdown("""
+| Range | Status |
+| :--- | :--- |
+| 🟢 **0 - 50** | Good |
+| 🟡 **51 - 100** | Moderate |
+| 🟠 **101 - 150** | Unhealthy (SG) |
+| 🔴 **151 - 200** | Unhealthy |
+| 🟣 **201 - 300** | Very Unhealthy |
+| 🟤 **301+** | Hazardous |
+    """)
+    
+    st.caption("US EPA Standard AQI Categories")
+    st.divider()
+
+    
+        
+    show_table = st.checkbox("📅 View Past 7 Days (Excl. Predictions)")
+# ... rest of your code ...
 if show_table and history_df is not None:
     st.divider()
     st.subheader("📋 Historical Data Log (Past 7 Days starting Yesterday)")
