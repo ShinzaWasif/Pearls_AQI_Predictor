@@ -254,32 +254,37 @@ def run_training():
     db = client[os.getenv("MONGO_DB_NAME")]
     collection = db[os.getenv("MONGO_COLLECTION_NAME")]
     
+    # We fetch data that has the 72h targets (generated during backfill/feature pipeline)
     cursor = collection.find({"city": "Karachi", "target_aqi_72h": {"$exists": True}})
     df = pd.DataFrame(list(cursor))
     
     if df.empty:
-        print("❌ Error: No valid training data. Run backfill first.")
+        print("❌ Error: No valid training data found in MongoDB. Please run the Backfill Pipeline first.")
         return
 
     # 2. Feature & Target Selection
+    # CRITICAL: We drop 'aqi' (raw) and keep 'aqi_calibrated' (multiplied by 1.42)
     target_cols = [f'target_aqi_{i}h' for i in range(1, 73)]
-    drop_cols = ['_id', 'timestamp', 'city', 'aqi', 'aqi_calibrated'] + target_cols
+    
+    # We explicitly drop the raw 'aqi' to prevent the model from learning from unscaled data
+    drop_cols = ['_id', 'timestamp', 'city', 'aqi'] + target_cols
     
     X = df.drop(columns=[c for c in drop_cols if c in df.columns]).select_dtypes(include=['number'])
     y = df[target_cols]
 
+    # Handle missing values using median (robust for Karachi AQI spikes)
     X = X.fillna(X.median()).replace([np.inf, -np.inf], 0)
     y = y.fillna(y.median())
 
-    print(f"📊 Training on {X.shape[1]} features for 72-hour forecast.")
+    print(f"📊 Training on {X.shape[1]} features (including Calibrated AQI) for 72-hour forecast.")
 
     # 3. Scaling & Split
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
     X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.15, random_state=42)
 
-    with mlflow.start_run(run_name=f"Karachi_Ensemble_{datetime.now().strftime('%m%d_%H%M')}"):
-        mlflow.log_params({"features_count": X.shape[1], "ensemble_size": 3})
+    with mlflow.start_run(run_name=f"Karachi_Calibrated_Ensemble_{datetime.now().strftime('%m%d_%H%M')}"):
+        mlflow.log_params({"features_count": X.shape[1], "ensemble_size": 3, "calibration_factor": 1.42})
 
         # --- MODEL A: XGBoost ---
         print("🌲 Training XGBoost...")
@@ -296,13 +301,13 @@ def run_training():
         lstm_model = build_lstm_model(X_train.shape[1])
         lstm_model.fit(X_train, y_train, epochs=50, batch_size=32, verbose=0, validation_split=0.1)
 
-        # 4. ENHANCED EVALUATION & DB LOGGING
+        # 4. ENHANCED EVALUATION
         results_mae = {}
         full_metrics_for_db = {}
         model_objs = {"XGBoost": xgb_model, "ANN": ann_model, "LSTM": lstm_model}
 
         print("\n" + "="*50)
-        print("🚀 KARACHI AQI MODEL PERFORMANCE REPORT")
+        print("🚀 KARACHI AQI MODEL PERFORMANCE (CALIBRATED)")
         print("="*50)
 
         for name, model in model_objs.items():
@@ -311,49 +316,46 @@ def run_training():
             rmse = np.mean(np.sqrt(mean_squared_error(y_test, preds, multioutput='raw_values')))
             r2 = r2_score(y_test, preds)
             mape = mean_absolute_percentage_error(y_test, preds)
-            medae = median_absolute_error(y_test, preds)
             
             mlflow.log_metric(f"{name}_MAE", mae)
-            mlflow.log_metric(f"{name}_RMSE", rmse)
             mlflow.log_metric(f"{name}_R2", r2)
-            mlflow.log_metric(f"{name}_MAPE", mape)
-            mlflow.log_metric(f"{name}_MedAE", medae)
             
             results_mae[name] = mae
             full_metrics_for_db[name] = {
-                "MAE": float(mae), "RMSE": float(rmse), "R2": float(r2),
-                "MAPE": float(mape), "MedAE": float(medae)
+                "MAE": float(mae), "RMSE": float(rmse), "R2": float(r2), "MAPE": float(mape)
             }
             
             print(f"📊 MODEL: {name}\n   🔹 MAE: {mae:.2f} | 🔹 R2: {r2:.2f}")
 
         # 5. REGISTRY LOGGING (SCALER & CHAMPION)
-        # Save scaler temporarily for logging, then delete
-        temp_scaler_path = "scaler.joblib"
-        joblib.dump(scaler, temp_scaler_path)
-        mlflow.log_artifact(temp_scaler_path)
-        os.remove(temp_scaler_path)
+        # We save the scaler so the Prediction Script can use the exact same normalization
+        scaler_path = "scaler.joblib"
+        joblib.dump(scaler, scaler_path)
+        mlflow.log_artifact(scaler_path)
 
         best_model_name = min(results_mae, key=results_mae.get)
         print(f"🏆 Champion Model: {best_model_name}")
 
         if best_model_name == "XGBoost":
-            mlflow.sklearn.log_model(xgb_model, "best_model", registered_model_name="AQI_72h_Karachi")
+            mlflow.sklearn.log_model(xgb_model, "best_model", registered_model_name="AQI_72h_Karachi_Calibrated")
         else:
-            mlflow.keras.log_model(model_objs[best_model_name], "best_model", registered_model_name="AQI_72h_Karachi")
+            mlflow.keras.log_model(model_objs[best_model_name], "best_model", registered_model_name="AQI_72h_Karachi_Calibrated")
 
-        # 6. SAVE ALL METRICS TO MONGODB
-        print("💾 Saving training metadata to MongoDB...")
+        # 6. SAVE PERFORMANCE HISTORY
         performance_audit = {
             "timestamp": datetime.now(),
-            "experiment": "AQI_72h_Forecasting_v2",
             "champion_model": best_model_name,
+            "calibration_used": 1.42,
             "mlflow_run_id": mlflow.active_run().info.run_id,
             "metrics": full_metrics_for_db
         }
         db["model_performance_history"].insert_one(performance_audit)
 
-        print(f"✅ Registered on DagsHub & Logged to MongoDB!")
+        # Cleanup local scaler file after logging
+        if os.path.exists(scaler_path):
+            os.remove(scaler_path)
+
+        print(f"✅ Training Complete. Best model ({best_model_name}) is now live!")
 
 if __name__ == "__main__":
     run_training()

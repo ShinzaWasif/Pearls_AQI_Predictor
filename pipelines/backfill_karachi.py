@@ -123,7 +123,7 @@ def get_robust_session():
     session = requests.Session()
     retry_strategy = Retry(
         total=3,
-        backoff_factor=1,  # Waits 1s, 2s, 4s between retries
+        backoff_factor=1,
         status_forcelist=[429, 500, 502, 503, 504],
     )
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -132,21 +132,19 @@ def get_robust_session():
     return session
 
 def fetch_weather_and_aq(lat, lon, start, end):
-    """Fetches historical PM2.5 and Weather data with error handling."""
+    """Fetches historical PM2.5 and Weather data with calibration."""
     session = get_robust_session()
     
     aq_url = (f"https://air-quality-api.open-meteo.com/v1/air-quality?"
               f"latitude={lat}&longitude={lon}&hourly=pm2_5&"
               f"start_date={start}&end_date={end}")
     
-    # Using the archive-api for historical weather
     w_url = (f"https://archive-api.open-meteo.com/v1/archive?"
              f"latitude={lat}&longitude={lon}&hourly=temperature_2m,"
              f"relative_humidity_2m,wind_speed_10m&"
              f"start_date={start}&end_date={end}")
     
     try:
-        # Added a 60-second timeout to handle large server-side processing
         aq_res = session.get(aq_url, timeout=60).json()
         w_res = session.get(w_url, timeout=60).json()
 
@@ -154,9 +152,12 @@ def fetch_weather_and_aq(lat, lon, start, end):
             print(f"⚠️ Warning: Missing hourly data for range {start} to {end}")
             return pd.DataFrame()
 
+        # --- APPLY 1.42 CALIBRATION IMMEDIATELY ---
+        pm25_calibrated = [val * 1.42 if val is not None else None for val in aq_res["hourly"]["pm2_5"]]
+
         df = pd.DataFrame({
             "timestamp": pd.to_datetime(aq_res["hourly"]["time"]),
-            "aqi": aq_res["hourly"]["pm2_5"], 
+            "aqi": pm25_calibrated, 
             "temp": w_res["hourly"]["temperature_2m"],
             "humidity": w_res["hourly"]["relative_humidity_2m"],
             "wind_speed": w_res["hourly"]["wind_speed_10m"]
@@ -169,16 +170,25 @@ def fetch_weather_and_aq(lat, lon, start, end):
 def run_backfill():
     # 1. Configuration for Batching
     lat, lon = 24.8607, 67.0011
-    start_date = datetime.strptime("2025-08-01", "%Y-%m-%d")
-    end_date = datetime.strptime("2026-02-01", "%Y-%m-%d")
+    
+    # --- DYNAMIC DATE LOGIC ---
+    today = datetime.now()
+    
+    # Calculate 6 months ago
+    six_months_ago = today - timedelta(days=180) 
+    # Adjust to the 1st of that month
+    start_date = six_months_ago.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    # End date is 8 days ago
+    end_date = today - timedelta(days=8)
     
     all_chunks = []
     current_start = start_date
 
-    print(f"🚀 Starting Batch Backfill: {start_date.date()} to {end_date.date()}")
+    print(f"🚀 Starting Dynamic Backfill (1.42x): {start_date.date()} to {end_date.date()}")
 
-    # 2. Fetch Data in 30-Day Chunks (Prevents Timeout)
-    while current_start < end_date:
+    # 2. Fetch Data in 30-Day Chunks
+    while current_start <= end_date:
         current_end = min(current_start + timedelta(days=30), end_date)
         
         s_str = current_start.strftime("%Y-%m-%d")
@@ -222,7 +232,7 @@ def run_backfill():
         db = client[db_name]
         collection = db[col_name]
         
-        print(f"📤 Syncing {len(df_final)} records...")
+        print(f"📤 Syncing {len(df_final)} calibrated records...")
         
         ops = [
             UpdateOne(
@@ -234,7 +244,7 @@ def run_backfill():
 
         if ops:
             result = collection.bulk_write(ops)
-            print(f"✅ Backfill Complete!")
+            print(f"✅ Calibrated Backfill Complete!")
             print(f"📊 Stats: {result.upserted_count} new records, {result.modified_count} updated.")
             
     except Exception as e:

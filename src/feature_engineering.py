@@ -83,14 +83,15 @@ def calculate_usa_aqi(pm_conc):
         return ((500 - 401) / (500.4 - 325.5)) * (cp - 325.5) + 401
 
 def compute_features(df, training_mode=True):
-    """
-    Computes features for Karachi AQI.
-    Set training_mode=False for real-time inference to prevent dropping recent data.
-    """
     df = df.sort_values('timestamp').reset_index(drop=True)
 
-    # 1. Official AQI Calculation
-    df['aqi_calibrated'] = df['aqi'].apply(calculate_usa_aqi)
+    # --- THE CALIBRATION STEP ---
+    # Apply the 1.42 multiplier to the raw PM2.5/AQI value first
+    df['aqi_calibrated_raw'] = df['aqi'] * 1.42
+    
+    # 1. Official AQI Calculation (using the calibrated value)
+    df['aqi_calibrated'] = df['aqi_calibrated_raw'].apply(calculate_usa_aqi)
+    # ----------------------------
 
     # 2. Time Features (Cyclic)
     df['hour'] = df['timestamp'].dt.hour
@@ -103,12 +104,11 @@ def compute_features(df, training_mode=True):
     # 3. Weather Interactions
     df['smog_index'] = (df['humidity'] / (df['wind_speed'] + 1)) * df['is_winter']
 
-    # 4. Rolling Averages & Lags
+    # 4. Rolling Averages & Lags (Now based on calibrated data)
     df['aqi_rolling_6h'] = df['aqi_calibrated'].rolling(window=6).mean()
     df['aqi_lag_1h'] = df['aqi_calibrated'].shift(1)
     df['aqi_lag_2h'] = df['aqi_calibrated'].shift(2)
     df['aqi_change_rate'] = (df['aqi_lag_1h'] - df['aqi_lag_2h']) / (df['aqi_lag_2h'] + 0.1)
-
     # 5. Future Leads (72h Forecast)
     future_data = {}
     for i in range(1, 73):
