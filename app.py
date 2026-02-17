@@ -9,8 +9,9 @@ import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pytz
+
 # --- CONFIG ---
-st.set_page_config(page_title="Karachi AQI Predictor", page_icon="🌬️", layout="wide")
+st.set_page_config(page_title="Karachi AQI Predictor", page_icon="", layout="wide")
 load_dotenv()
 
 # --- DYNAMIC CORRECTION LOGIC ---
@@ -86,43 +87,35 @@ def load_dashboard_data():
         
         return aqi_history, latest_pred_record, perf_data, history_df
     except Exception as e:
-        st.error(f"❌ Connection Error: {e}")
+        st.error(f" Connection Error: {e}")
         return None, None, None, None
 
 aqi_list, pred_record, performance, history_df = load_dashboard_data()
 
 if not aqi_list:
-    st.warning("📡 No real-time data found. Ensure your pipeline is feeding actual observations.")
+    st.warning(" No real-time data found. Ensure your pipeline is feeding actual observations.")
     st.stop()
 
 latest_data = aqi_list[0]
 prev_data = aqi_list[1] if len(aqi_list) > 1 else latest_data
 
 # --- UI: TOP SECTION ---
-# 1. Get raw timestamp from MongoDB
 ts_raw = latest_data.get('timestamp', datetime.now())
-
-# 2. Check if we are on the Cloud (UTC) or Local (PKT)
-# time.timezone is the offset in seconds. UTC is 0. 
-# Karachi (UTC+5) is -18000 seconds.
 is_utc_server = (time.timezone == 0)
 
 if is_utc_server:
-    # We are on the Cloud! Convert 10 AM UTC -> 3 PM PKT
     karachi_tz = pytz.timezone("Asia/Karachi")
     if ts_raw.tzinfo is None:
         ts_raw = pytz.utc.localize(ts_raw)
     ts = ts_raw.astimezone(karachi_tz)
 else:
-    # We are Local! It's already 3 PM, so just keep it as is.
     ts = ts_raw
-st.title("🌬️ Karachi Real-Time AQI Predictor")
 
-# FIX: Check for 'aqi_calibrated' from DB first to get the 80s range
+st.title("Karachi Real-Time AQI Predictor")
+
 if 'aqi_calibrated' in latest_data:
     current_aqi = round(float(latest_data['aqi_calibrated']))
 else:
-    # Fallback to dynamic correction if the column doesn't exist
     current_aqi = get_dynamic_aqi(latest_data.get('aqi', 0), latest_data.get('humidity', 50))
 
 status, color, advice = get_aqi_status(current_aqi)
@@ -140,7 +133,7 @@ with header_col1:
 with header_col2:
     st.markdown(f"""
         <div class="health-card" style="border-left-color: {color}; height:150px;">
-            <h3 style="margin-top:0; font-size: 1.2rem;">🛡️ Health Advisory</h3>
+            <h3 style="margin-top:0; font-size: 1.2rem;"> Health Advisory</h3>
             <p style="font-size: 1rem; line-height: 1.4;">{advice}</p>
             <p style="font-size: 0.75rem; opacity: 0.7;">Sync: {ts.strftime('%I:%M %p')} | Mode: Dual-Check Calibration</p>
         </div>
@@ -152,15 +145,15 @@ def render_metric(col, label, key, unit, inv=False):
     curr, prev = latest_data.get(key, 0), prev_data.get(key, 0)
     col.metric(label, f"{curr:.1f}{unit}", delta=f"{curr-prev:.1f}{unit}", delta_color="inverse" if (curr-prev > 0 and inv) else "normal")
 
-render_metric(m1, "🌡️ Temp", 'temp', "°C")
-render_metric(m2, "💧 Humidity", 'humidity', "%", inv=True)
-render_metric(m3, "💨 Wind", 'wind_speed', " km/h")
-render_metric(m4, "🌫️ Smog Index", 'smog_index', "")
+render_metric(m1, " Temp", 'temp', "°C")
+render_metric(m2, " Humidity", 'humidity', "%", inv=True)
+render_metric(m3, " Wind", 'wind_speed', " km/h")
+render_metric(m4, " Smog Index", 'smog_index', "")
 
 st.divider()
 
 # --- UI: FORECAST ---
-st.subheader("🔮 72-Hour Forecast Outlook")
+st.subheader(" 72-Hour Forecast Outlook")
 if pred_record and "predicted_72h" in pred_record:
     hourly_preds = pred_record["predicted_72h"]
     f_cols = st.columns(3)
@@ -178,7 +171,7 @@ if pred_record and "predicted_72h" in pred_record:
 st.divider()
 c_imp, c_perf = st.columns([1, 1])
 with c_imp:
-    st.subheader("🧬 Specific Feature Importance")
+    st.subheader(" Specific Feature Importance")
     feats = ['smog_index', 'wind_speed', 'humidity', 'temp', 'aqi_lag_24h', 'aqi_change_rate']
     imp_df = pd.DataFrame([{"Feature": f, "Value": abs(latest_data.get(f, 0))} for f in feats if f in latest_data]).sort_values("Value")
     fig_imp = px.bar(imp_df, x="Value", y="Feature", orientation='h', color="Value", color_continuous_scale='Emrld', template="plotly_dark")
@@ -186,47 +179,39 @@ with c_imp:
     st.plotly_chart(fig_imp, use_container_width=True)
 
 with c_perf:
-    st.subheader("📊 Model Performance Registry")
+    st.subheader(" Model Performance Registry")
     if performance:
         m_dict = performance.get("metrics", {})
         champ = performance.get("champion_model", "XGBoost")
-        rows = [{"Model": ("🏆 " + n if n == champ else n), "MAE": round(v.get('MAE',0),2), "R²": round(v.get('R2',0),2), "MedAE": round(v.get('MedAE',0),2)} for n, v in m_dict.items()]
+        rows = [{"Model": (n if n != champ else "Champion " + n), "MAE": round(v.get('MAE',0),2), "R2": round(v.get('R2',0),2), "MedAE": round(v.get('MedAE',0),2)} for n, v in m_dict.items()]
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 # --- SIDEBAR ---
-# --- HELPER FUNCTION FOR AQI CATEGORY ---
 def get_aqi_category(aqi):
     if aqi <= 50:
-        return "Good", "#00e400", "🟢"
+        return "Good", "#00e400"
     elif aqi <= 100:
-        return "Moderate", "#ffff00", "🟡"
+        return "Moderate", "#ffff00"
     elif aqi <= 150:
-        return "Unhealthy for Sensitive Groups", "#ff7e00", "🟠"
+        return "Unhealthy for Sensitive Groups", "#ff7e00"
     elif aqi <= 200:
-        return "Unhealthy", "#ff0000", "🔴"
+        return "Unhealthy", "#ff0000"
     elif aqi <= 300:
-        return "Very Unhealthy", "#8f3f97", "🟣"
+        return "Very Unhealthy", "#8f3f97"
     else:
-        return "Hazardous", "#7e0023", "🟤"
+        return "Hazardous", "#7e0023"
 
-# --- SIDEBAR ---
-# --- SIDEBAR ---
-# --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Controls")
-    # --- REGULAR SIDEBAR CONTROLS ---
+    st.header(" Controls")
     if performance:
-        st.success(f"🏆 Active Model: {performance.get('champion_model', 'XGBoost')}")
+        st.success(f" Active Model: {performance.get('champion_model', 'XGBoost')}")
     
-    if st.button("🔄 Refresh Dashboard"):
+    if st.button(" Refresh Dashboard"):
         st.cache_data.clear()
         st.rerun()
     st.divider()
 
-    # --- STATIC AQI REFERENCE TABLE ---
-    st.subheader("📊 AQI Health Levels")
-    
-    # Using a clean Markdown Table - no risk of raw HTML tags showing up
+    st.subheader(" AQI Health Levels")
     st.markdown("""
 | Range | Status |
 | :--- | :--- |
@@ -237,17 +222,14 @@ with st.sidebar:
 | 🟣 **201 - 300** | Very Unhealthy |
 | 🟤 **301+** | Hazardous |
     """)
-    
     st.caption("US EPA Standard AQI Categories")
     st.divider()
 
-    
-        
-    show_table = st.checkbox("📅 View Past 7 Days (Excl. Predictions)")
-# ... rest of your code ...
+    show_table = st.checkbox(" View Past 7 Days (Excl. Predictions)")
+
 if show_table and history_df is not None:
     st.divider()
-    st.subheader("📋 Historical Data Log (Past 7 Days starting Yesterday)")
+    st.subheader(" Historical Data Log (Past 7 Days starting Yesterday)")
     cols_to_show = ['timestamp', 'aqi', 'aqi_calibrated', 'temp', 'humidity', 'wind_speed', 'smog_index']
     display_df = history_df[[c for c in cols_to_show if c in history_df.columns]].copy()
     st.dataframe(display_df, use_container_width=True)
